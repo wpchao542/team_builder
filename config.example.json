@@ -1,0 +1,16 @@
+{
+  "_说明": "复制成 config.json 并填入你的 key。这里的键会在启动时注入 process.env，shell 工具（curl 调 ElevenLabs 等）可直接用 $ELEVENLABS_API_KEY。已存在的系统环境变量优先，不会被覆盖。",
+
+  "ANTHROPIC_API_KEY": "",
+  "ELEVENLABS_API_KEY": "",
+
+  "MODEL": "claude-opus-4-8",
+  "ENABLE_CODEX_CLI": "1",
+  "CODEX_MODEL": "",
+  "CODEX_BIN": "codex",
+  "OLLAMA_MODEL": "minimax-m3:cloud",
+  "OLLAMA_HOST_URL": "http://localhost:11434",
+
+  "ALLOW_TOOLS": "1",
+  "TOOL_TIMEOUT_MS": "600000"
+}

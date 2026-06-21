@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+
+# 敏感配置（含 API key / 凭证）——只提交 config.example.json
+config.json
+.env
+.env.*
+
+# 用户业务数据（团队 / 出征记录 / 记忆）——不入库
+teams/
+runs/
+memory/
+
+# 运行产物 / 临时文件
+*.log
+*.bak-*
+/tmp/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

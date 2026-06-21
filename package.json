@@ -1,0 +1,19 @@
+{
+  "name": "agent-team-studio",
+  "version": "0.1.0",
+  "description": "点将台 —— 用一句话生成并运行一个 agent 团队",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wpchao542/team_builder.git"
+  },
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "mock": "MOCK=1 node server.js",
+    "test": "MOCK=1 node --test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1"
+  }
+}
