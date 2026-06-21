@@ -8,6 +8,9 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const os = require("os");
+const { DESIGN_SYSTEM, TEAM_SCHEMA, PLATFORM_CATALOG, BLUEPRINT_SYSTEM, BLUEPRINT_SCHEMA, STAFF_SYSTEM, SKILL_DESIGN_SYSTEM, SKILL_TEAM_SCHEMA, EDIT_AGENT_SCHEMA, HARNESS_LANG_DIRECTIVE } = require("./lib/prompts");
+const { REAL_TOOL_NAMES } = require("./lib/constants");
+const { extractJson, unwrapTeamSpec, splitLeadingEmoji, normalizeSkillSources, skillSourcesDigest, uniqueNonEmptyStrings, cleanOriginText, buildTeamOrigin, normalizeTeamOrigin, inferTeamOrigin, cleanModuleTitle, slugifyModuleId, isExplicitSkillModuleTitle, isSupplementalSkillModuleTitle, extractSkillModules, attachSkillModuleContent, formatSkillModuleOutline, buildTeamGlobalSkill, inferAgentRole, normalizeAgentRisk, normalizeSpec, toSecretsObject, normalizeBlueprint, mockBlueprint } = require("./lib/skills");
 
 const PORT = process.env.PORT || 7860;
 const MOCK = process.env.MOCK === "1";
@@ -474,221 +477,13 @@ const CONFIG_KEYS = CONFIG_GROUPS.flatMap((g) => g.fields.map((f) => f.key));
 
 // ---------- 团队设计 ----------
 
-const DESIGN_SYSTEM = `你是「点将台」的首席团队架构师。用户用自然语言描述一个目标或任务，你为它组建一支 AI agent 团队。
-
-要求：
-1. 设计 3~8 个 agent，各有清晰分工，避免职责重叠。
-2. 团队用一张有向无环图展示建议协作结构：每个 agent 的 depends_on 列出通常会给它提供产出的同事（用对方的 id）。没有建议上游就留空数组。DAG 用于界面层级与作战状态展示，运行时由团队主 Agent 动态控制成员。
-3. **团队要有真实的层级结构**：像一家公司——前线成员产出原料，中层（小组长/主笔/统稿人等）聚合自己负责的几条线再向上交付，最后才到收尾人。依赖链路至少 3 层（前线 → 中层 → 收尾）。**禁止所有成员都直接挂在同一个收尾人身上**（那是星形，不是团队）。
-4. 必须有且只有一个"收尾" agent（没有任何人依赖它），负责整合直接下属的产出，输出最终交付物。
-5. 每个 agent：
-   - id: 小写英文标识（字母数字连字符）
-   - name: 优先使用贴合职责的军队或军帐风格中文称号，如斥候、参军、校尉、主簿、先锋、军需官、督军等；要易懂、不浮夸，只能写名字文字，禁止包含 emoji、图标或装饰符号
-   - emoji: 一个代表性 emoji，是界面显示的唯一成员图标；名字旁想用的图标必须只写在这里
-   - role: 职位/职责一句话
-   - persona: 性格与做事风格，1~2 句
-   - system_prompt: 这个 agent 的完整系统提示词，200~400 字。要包含：身份与专长、性格与表达风格、具体职责、对输出的明确要求（结构、深度、格式）。写得让它能独立胜任工作。
-   - tools: 该成员可调用的真执行工具名数组（见下）。纯创意/策划/写作成员留空数组 []；只有需要真正动手产出文件或跑命令行的成员才授予工具。
-   - model: 留空字符串 ""（默认继承将军模型）。将军与每个成员子 Agent 都可以使用不同模型，但默认不要乱填，交给用户在界面上按需调。
-   - risk: 由你在点将阶段判断该成员职责是否包含高危操作。不要靠关键词机械判断，要理解成员真实职责、system_prompt 与工具权限：
-     * level: "none" 或 "danger"
-     * summary: level 为 danger 时用一句话说明危险点；否则空字符串
-     * operations: level 为 danger 时列出 1~5 条具体危险操作（如删除文件、销毁资源、清空数据、覆盖生产文件等）；否则 []
-     只有成员职责明确包含删除、销毁、清空、覆盖不可恢复数据/文件/资源等真实破坏性动作时才标 danger；普通读取、写新文件、生成稿件、渲染、分析不要标。
-6. team_name 简短有力，summary 用一段话说明团队如何分层协作完成该任务。
-7. system_prompt 里不要提到"等待上游输入"之类的流程细节——运行时会自动把上游产出交给它。
-8. 可授予的工具目录（只能从这里选，不要发明新工具）：
-   - "shell"：执行 shell 命令（curl 调 ElevenLabs 配音、ffmpeg 合成/倍速视频、whisper 对时、puppeteer 渲帧、dreamina CLI 出图，或经 mcporter 调 MCP）
-   - "write_file"：把内容写入工作目录的文件（如口播稿.md、cover.html、渲染脚本）
-   - "read_file"：读取工作目录里的文件
-   原则：能"真出片/真出图/真写文件"的执行型成员才给工具；负责构思、文案、策划的成员给 []。给了 shell 的成员通常也一并给 write_file 和 read_file。`;
-
-const TEAM_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["team_name", "emoji", "summary", "agents"],
-  properties: {
-    team_name: { type: "string" },
-    emoji: { type: "string" },
-    summary: { type: "string" },
-    agents: {
-      type: "array",
-      minItems: 3,
-      maxItems: 8,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "name", "emoji", "role", "persona", "system_prompt", "depends_on", "risk"],
-        properties: {
-          id: { type: "string", description: "小写英文标识" },
-          name: { type: "string", description: "优先使用贴合职责、易懂的军队或军帐风格纯文字成员名，禁止包含 emoji、图标或装饰符号" },
-          emoji: { type: "string", description: "恰好一个代表性 emoji，作为该成员唯一显示图标" },
-          role: { type: "string" },
-          persona: { type: "string" },
-          system_prompt: { type: "string" },
-          depends_on: { type: "array", items: { type: "string" } },
-          tools: {
-            type: "array",
-            description: "该成员可调用的真执行工具名（来自固定目录），不需要执行就留空数组",
-            items: { type: "string", enum: ["shell", "write_file", "read_file"] },
-          },
-          model: {
-            type: "string",
-            description: "该成员单独使用的模型 id（如 claude-opus-4-8 / minimax-m3:cloud）。留空字符串则用系统默认模型。",
-          },
-          risk: {
-            type: "object",
-            additionalProperties: false,
-            required: ["level", "summary", "operations"],
-            description: "点将模型对该成员危险程度的结构化判断；只在真实职责包含删除/销毁/清空/覆盖不可恢复资源时标 danger。",
-            properties: {
-              level: { type: "string", enum: ["none", "danger"] },
-              summary: { type: "string" },
-              operations: { type: "array", items: { type: "string" }, maxItems: 5 },
-            },
-          },
-        },
-      },
-    },
-    secrets: {
-      type: "array",
-      description: "团队级凭证：仅在导入 skill 时，把 skill 原文里真实出现的 API key/凭证提取到这里（普通点将留空数组）。",
-      items: {
-        type: "object", additionalProperties: false, required: ["key", "value"],
-        properties: { key: { type: "string", description: "环境变量名，如 ELEVENLABS_API_KEY" }, value: { type: "string", description: "凭证值" } },
-      },
-    },
-  },
-};
 
 // ========== 作战蓝图（勘察阶段）：先把一句话想清楚，再组队 ==========
 // 像 Claude 接到任务那样：先讲清要做哪些事、配哪些工具、接哪些平台、还有哪些得用户拍板，再去点兵。
-const PLATFORM_CATALOG = `# 可选外部平台目录（推荐时优先从这里选，并讲清理由；这件事纯靠模型就能完成、不需要外部平台时给空数组）
-- 配音 / TTS：ElevenLabs（多语种、音色克隆，质量高，需 ELEVENLABS_API_KEY）｜MiniMax 语音（中文自然，需 DASHSCOPE_API_KEY）｜OpenAI TTS
-- 文生图 / 出图：即梦 Dreamina（中文海报、分镜强）｜可灵 Kling｜Stable Diffusion（本地）
-- 文生视频 / 对口型：可灵 Kling｜Runway｜即梦
-- 视频合成 / 剪辑：ffmpeg（本地，走 shell）｜剪映草稿
-- 语音转写 / 对时：Whisper（本地，走 shell）
-- 渲染 / 截帧：Puppeteer（本地 headless Chrome，走 shell）
-- 网络检索 / 资料：Web 搜索｜官方文档抓取
-- 代码 / 部署：本地 shell｜GitHub
-- 已接入的 MCP 工具：经 mcporter 调用对应 MCP server`;
 
-const BLUEPRINT_SYSTEM = `你是「点将台」的首席方案架构师。用户只给一句话，但你不能直接拉一堆人来写文章——你要先像 Claude 接到任务时那样，把这件事想清楚并讲给用户听，再去组队。
 
-你的产物是一份【作战蓝图】，必须包含：
-1. goal：把用户这句话还原成清晰、可执行的目标（补全隐含意图，但不要擅自扩大范围）。
-2. tasks：把目标拆成 2~7 个具体任务，写明先后或并行关系。每个任务写 title、detail（具体做什么、产出什么真实产物）、acceptance（验收标准：怎样算这步做对了）。任务要落到真实产出（文件、图、音频、视频、数据、代码等），不要"写一篇文章"这种空话。
-3. tools_needed：完成这些任务真正需要的执行工具（shell / write_file / read_file），每条说明为什么需要、用在哪个任务。纯靠模型构思就能完成的别硬塞工具。
-4. external_platforms：需要调用的外部平台 / 服务。每条给出 capability（要解决什么）、recommended（你最推荐哪个）、alternatives（其他可选）、why（为什么推荐它）、needs_credential（是否需要凭证）、env_key（需要凭证时给出环境变量名，否则空字符串）。从下面目录里选并讲清理由；纯靠模型自身就能完成、不需要外部平台时给空数组。
-5. open_questions：你需要用户拍板或补充才能继续的关键问题（风格偏好、目标平台、是否已有素材、时长 / 预算等）。每条给 question 和 why（为什么这个问题会影响方案）。宁可问，也不要替用户瞎猜。
 
-${PLATFORM_CATALOG}
 
-像一个会沟通的资深主理人那样思考：先把"这句话其实要做哪些事、要配哪些工具、建议接哪些平台、还有哪些得你定"讲清楚，把决策权交还给用户。只输出符合 schema 的 JSON。`;
-
-const BLUEPRINT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["goal", "tasks", "tools_needed", "external_platforms", "open_questions"],
-  properties: {
-    goal: { type: "string", description: "把用户一句话还原成的清晰可执行目标" },
-    tasks: {
-      type: "array", minItems: 1, maxItems: 9,
-      items: {
-        type: "object", additionalProperties: false,
-        required: ["title", "detail", "acceptance"],
-        properties: {
-          title: { type: "string" },
-          detail: { type: "string", description: "这一步具体做什么、产出什么真实产物" },
-          acceptance: { type: "string", description: "验收标准：怎样算这步做对了" },
-        },
-      },
-    },
-    tools_needed: {
-      type: "array",
-      items: {
-        type: "object", additionalProperties: false,
-        required: ["tool", "why"],
-        properties: {
-          tool: { type: "string", enum: ["shell", "write_file", "read_file"] },
-          why: { type: "string", description: "为什么需要、用在哪个任务" },
-        },
-      },
-    },
-    external_platforms: {
-      type: "array",
-      items: {
-        type: "object", additionalProperties: false,
-        required: ["capability", "recommended", "alternatives", "why", "needs_credential", "env_key"],
-        properties: {
-          capability: { type: "string", description: "要解决什么能力（如配音、出图、渲帧）" },
-          recommended: { type: "string", description: "最推荐的那个平台" },
-          alternatives: { type: "array", items: { type: "string" } },
-          why: { type: "string", description: "为什么推荐它" },
-          needs_credential: { type: "boolean" },
-          env_key: { type: "string", description: "需要凭证时的环境变量名，否则空字符串" },
-        },
-      },
-    },
-    open_questions: {
-      type: "array",
-      items: {
-        type: "object", additionalProperties: false,
-        required: ["question", "why"],
-        properties: {
-          question: { type: "string" },
-          why: { type: "string", description: "为什么这个问题会影响方案" },
-        },
-      },
-    },
-  },
-};
-
-function normalizeBlueprint(raw) {
-  raw = raw && typeof raw === "object" ? raw : {};
-  return {
-    goal: String(raw.goal || ""),
-    tasks: (Array.isArray(raw.tasks) ? raw.tasks : []).map((t) => ({
-      title: String(t?.title || ""),
-      detail: String(t?.detail || ""),
-      acceptance: String(t?.acceptance || ""),
-    })).filter((t) => t.title || t.detail),
-    tools_needed: (Array.isArray(raw.tools_needed) ? raw.tools_needed : []).map((t) => ({
-      tool: String(t?.tool || ""),
-      why: String(t?.why || ""),
-    })).filter((t) => REAL_TOOL_NAMES.includes(t.tool)),
-    external_platforms: (Array.isArray(raw.external_platforms) ? raw.external_platforms : []).map((p) => ({
-      capability: String(p?.capability || ""),
-      recommended: String(p?.recommended || ""),
-      alternatives: (Array.isArray(p?.alternatives) ? p.alternatives : []).map(String),
-      why: String(p?.why || ""),
-      needs_credential: !!p?.needs_credential,
-      env_key: String(p?.env_key || ""),
-    })).filter((p) => p.capability || p.recommended),
-    open_questions: (Array.isArray(raw.open_questions) ? raw.open_questions : []).map((q) => ({
-      question: String(q?.question || ""),
-      why: String(q?.why || ""),
-      answer: String(q?.answer || ""), // 用户在蓝图面板里的拍板（点兵时作为硬约束）
-    })).filter((q) => q.question),
-  };
-}
-
-function mockBlueprint(description) {
-  return normalizeBlueprint({
-    goal: `（演示）${description || "完成用户描述的目标"}`,
-    tasks: [
-      { title: "拆解与策划", detail: "明确产出形态、受众与结构", acceptance: "有一份可执行的内容大纲" },
-      { title: "生产与产出", detail: "按大纲产出真实文件 / 素材", acceptance: "产物存在且符合大纲要求" },
-      { title: "整合与收尾", detail: "整合为最终交付物并自检", acceptance: "最终交付物完整可用" },
-    ],
-    tools_needed: [{ tool: "write_file", why: "演示：把产物写入工作目录" }],
-    external_platforms: [
-      { capability: "配音 / TTS", recommended: "ElevenLabs", alternatives: ["MiniMax 语音"], why: "演示项：质量高、多语种", needs_credential: true, env_key: "ELEVENLABS_API_KEY" },
-    ],
-    open_questions: [{ question: "目标平台 / 风格偏好是什么？", why: "影响产出形态与配音风格" }],
-  });
-}
 
 async function designBlueprint(description, designModel, send) {
   if (provider === "mock") return mockBlueprint(description);
@@ -882,445 +677,26 @@ async function bailianChat({ system, user, model, onDelta, onThinking, jsonMode,
   return { content, thinking, toolCalls, usage };
 }
 
-// 模型偶尔会包围栏、夹带思考文字、或在 JSON 前后加说明——平衡括号扫描提取所有候选对象
-function extractJson(text) {
-  if (!text || !text.trim()) throw new Error("模型返回了空内容。");
-  try { return JSON.parse(text); } catch {}
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenced) { try { return JSON.parse(fenced[1]); } catch {} }
-  const candidates = [];
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] !== "{") continue;
-    let depth = 0, inStr = false, escNext = false;
-    for (let j = i; j < text.length; j++) {
-      const c = text[j];
-      if (escNext) { escNext = false; continue; }
-      if (c === "\\") { escNext = true; continue; }
-      if (c === '"') { inStr = !inStr; continue; }
-      if (inStr) continue;
-      if (c === "{") depth++;
-      else if (c === "}") {
-        depth--;
-        if (depth === 0) { candidates.push(text.slice(i, j + 1)); i = j; break; }
-      }
-    }
-  }
-  candidates.sort((a, b) => b.length - a.length); // 大的优先（团队配置通常是最大那块）
-  for (const c of candidates) {
-    if (!c.includes('"agents"')) continue;
-    try { return JSON.parse(c); } catch {}
-  }
-  for (const c of candidates) { try { return JSON.parse(c); } catch {} }
-  throw new Error("模型返回的内容不是合法 JSON。");
-}
 
-// 兼容模型/CLI 偶尔多包一层 team/spec/result/data，或把 agents 命名成 members。
-// 返回原对象是为了让后续校验给出统一错误，而不是在这里吞掉真实响应。
-function unwrapTeamSpec(raw) {
-  let cur = raw;
-  for (let depth = 0; depth < 5; depth++) {
-    if (typeof cur === "string") {
-      try { cur = extractJson(cur); } catch { return cur; }
-    }
-    if (!cur || typeof cur !== "object" || Array.isArray(cur)) return cur;
-    if (Array.isArray(cur.agents)) return cur;
-    if (cur.agents && typeof cur.agents === "object" && !Array.isArray(cur.agents)) {
-      return {
-        ...cur,
-        agents: Object.entries(cur.agents).map(([id, agent]) =>
-          agent && typeof agent === "object" ? { id, ...agent } : { id, role: String(agent || "") }
-        ),
-      };
-    }
-    for (const key of ["members", "team_members", "teamMembers", "nodes"]) {
-      if (Array.isArray(cur[key])) return { ...cur, agents: cur[key] };
-    }
-    const key = ["team", "spec", "result", "data", "output"]
-      .find((k) => cur[k] && (typeof cur[k] === "object" || typeof cur[k] === "string"));
-    if (!key) return cur;
-    cur = cur[key];
-  }
-  return cur;
-}
 
-// 取出字符串开头的 emoji（含变体选择符 / 肤色 / ZWJ 组合），返回 {emoji, rest}
-function splitLeadingEmoji(s) {
-  const m = String(s || "").match(/^\s*((?:\p{Extended_Pictographic}(?:️|\p{Emoji_Modifier}|‍\p{Extended_Pictographic})*)+)\s*/u);
-  if (m && m[1]) return { emoji: m[1].trim(), rest: String(s).slice(m[0].length).trim() };
-  return { emoji: "", rest: String(s || "").trim() };
-}
 
-function normalizeSkillSources(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((s) => s && typeof s === "object" && s.content != null)
-    .map((s, i) => ({ name: String(s.name || `skill-${i + 1}.md`), content: String(s.content) }));
-}
 
-function skillSourcesDigest(sources) {
-  const hash = crypto.createHash("sha256");
-  for (const source of normalizeSkillSources(sources)) {
-    hash.update(source.name, "utf8");
-    hash.update("\0");
-    hash.update(source.content, "utf8");
-    hash.update("\xff");
-  }
-  return hash.digest("hex");
-}
 
-function uniqueNonEmptyStrings(list = []) {
-  return [...new Set((Array.isArray(list) ? list : [])
-    .map((x) => String(x || "").trim())
-    .filter(Boolean))];
-}
 
-function cleanOriginText(text = "") {
-  const value = String(text || "").trim();
-  return value === "（由导入的 skill 生成）" ? "" : value;
-}
 
-function buildTeamOrigin(description = "", skills = []) {
-  const text = cleanOriginText(description);
-  const skillSources = normalizeSkillSources(skills);
-  const skillPaths = uniqueNonEmptyStrings(skillSources.map((s) => s.name));
-  if (!text && !skillPaths.length) return null;
-  return {
-    source: "design_input",
-    mode: skillPaths.length && text ? "mixed" : (skillPaths.length ? "skill" : "text"),
-    text,
-    skill_paths: skillPaths,
-    skill_count: skillSources.length || skillPaths.length,
-  };
-}
 
-function normalizeTeamOrigin(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const text = cleanOriginText(raw.text || raw.description || raw.prompt || raw.input || "");
-  const skillPaths = uniqueNonEmptyStrings(raw.skill_paths || raw.skillPaths || raw.paths || raw.files);
-  const rawCount = Number(raw.skill_count ?? raw.skillCount ?? skillPaths.length);
-  const skillCount = Number.isFinite(rawCount) ? Math.max(0, Math.floor(rawCount)) : skillPaths.length;
-  if (!text && !skillPaths.length && !skillCount) return null;
-  let mode = String(raw.mode || raw.type || "").toLowerCase();
-  if (!["text", "skill", "mixed", "unknown"].includes(mode)) {
-    mode = skillPaths.length && text ? "mixed" : (skillPaths.length || skillCount ? "skill" : "text");
-  }
-  if (mode === "text" && skillPaths.length) mode = text ? "mixed" : "skill";
-  if (mode === "skill" && text) mode = skillPaths.length || skillCount ? "mixed" : "text";
-  if (mode === "unknown") mode = skillPaths.length && text ? "mixed" : (skillPaths.length || skillCount ? "skill" : "text");
-  return {
-    source: String(raw.source || raw.source_type || "").trim(),
-    mode,
-    text,
-    skill_paths: skillPaths,
-    skill_count: Math.max(skillCount, skillPaths.length),
-  };
-}
 
-function inferTeamOrigin(raw) {
-  const saved = normalizeTeamOrigin(raw?.origin || raw?.source_meta || raw?.creation_source);
-  const fallback = buildTeamOrigin("", raw?.skill_sources || []);
-  if (!saved) return fallback;
-  const skillPaths = saved.skill_paths.length ? saved.skill_paths : (fallback?.skill_paths || []);
-  const lastTaskText = cleanOriginText(raw?.last_task || "");
-  const textLooksLikeLastTask = saved.text && lastTaskText && saved.text === lastTaskText;
-  const text = saved.source === "design_input" || !textLooksLikeLastTask ? saved.text : "";
-  const skillCount = Math.max(saved.skill_count || 0, fallback?.skill_count || 0, skillPaths.length);
-  if (!text && !skillPaths.length && !skillCount) return null;
-  let mode = saved.mode;
-  if (skillPaths.length && text) mode = "mixed";
-  else if (skillPaths.length || skillCount) mode = "skill";
-  else if (text) mode = "text";
-  return { source: saved.source || "", mode, text, skill_paths: skillPaths, skill_count: skillCount };
-}
 
-function cleanModuleTitle(title) {
-  return String(title || "")
-    .replace(/^[\s#*-]+/, "")
-    .replace(/\s*\{#.*?\}\s*$/, "")
-    .trim();
-}
 
-function slugifyModuleId(file, title, index) {
-  const base = `${file}-${title}`.toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return (base || `module-${index + 1}`).slice(0, 80);
-}
 
-function isExplicitSkillModuleTitle(title) {
-  const t = cleanModuleTitle(title);
-  return /^(?:step\s*[0-9a-z]+|步骤\s*[0-9一二三四五六七八九十零]*|阶段\s*[0-9一二三四五六七八九十零]*|模块\s*[0-9一二三四五六七八九十零]*|功能模块)(?:$|[\s：:.)、-])/i.test(t);
-}
 
-function isSupplementalSkillModuleTitle(title) {
-  const t = cleanModuleTitle(title);
-  if (!t) return false;
-  if (isExplicitSkillModuleTitle(t)) return true;
-  if (/^(?:\d+[a-z]?[.)、]|[一二三四五六七八九十]+[、.])/.test(t)) return false;
-  if (/(?:注意事项|常见问题|目录结构|参数|验证|自查|范例|示例|参考片段|design\s*tokens|字体|排版|模板|关键变更|输出文件|改写目标|改写允许|不能动|风格定位|start_time|描边|位置|应该\s*[<>=]|demo_)/i.test(t)) return false;
-  return /(?:执行流程|生成|合成|渲染|下载|提交|构造|改写|拆分|切分|对时|配音|字幕|封面|复盘|确认|口播|画面|视频|音频|生产笔记|prompt)/i.test(t);
-}
 
-function extractSkillModules(sources) {
-  const modules = [];
-  const seen = new Set();
-  const pushModule = (source, title, level, start) => {
-    const cleaned = cleanModuleTitle(title);
-    if (!cleaned) return null;
-    const seed = slugifyModuleId(source.name, cleaned, modules.length);
-    let id = seed, n = 2;
-    while (seen.has(id)) id = `${seed}-${n++}`;
-    seen.add(id);
-    const mod = { id, file: source.name, title: cleaned, level, start: start || 0, body: "" };
-    modules.push(mod);
-    return mod;
-  };
-  for (const source of normalizeSkillSources(sources)) {
-    const content = String(source.content || "");
-    const headings = [];
-    const re = /^(#{1,4})\s+(.+?)\s*$/gm;
-    let m;
-    while ((m = re.exec(content))) {
-      const level = m[1].length;
-      const title = cleanModuleTitle(m[2]);
-      if (!title) continue;
-      headings.push({ level, title, index: m.index });
-    }
-    if (!headings.length) {
-      const sectionRe = /^\s*(?:[-*]\s*)?((?:step|步骤|阶段|模块|功能|流程)\s*[0-9a-z一二三四五六七八九十零]*\s*[：:.)、-]\s*[^\n]{2,120})\s*$/gmi;
-      while ((m = sectionRe.exec(content))) {
-        const title = cleanModuleTitle(m[1]);
-        if (title) headings.push({ level: 3, title, index: m.index });
-      }
-    }
-    const explicit = headings.filter((h) => isExplicitSkillModuleTitle(h.title));
-    const supplemental = headings.filter((h) => h.level <= 2 && isSupplementalSkillModuleTitle(h.title));
-    const selected = explicit.length >= 2
-      ? explicit
-      : [...explicit, ...supplemental.filter((h) => !explicit.some((e) => e.title === h.title))];
-    let usable = selected.length ? selected.slice(0, 40) : [];
-    if (!usable.length) {
-      const mod = pushModule(source, path.basename(source.name), 1, 0);
-      if (mod) mod.body = content.trim();
-      continue;
-    }
-    // 按文档顺序排序，便于把每个模块的 verbatim 正文切出来（本标题处 → 下一标题处）
-    usable = usable.slice().sort((a, b) => a.index - b.index);
-    const fileMods = [];
-    for (const h of usable) { const mod = pushModule(source, h.title, h.level, h.index); if (mod) fileMods.push(mod); }
-    for (let i = 0; i < fileMods.length; i++) {
-      const s = fileMods[i].start;
-      const e = i + 1 < fileMods.length ? fileMods[i + 1].start : content.length;
-      fileMods[i].body = content.slice(s, e).trim();
-    }
-  }
-  return modules;
-}
-// 按成员的 module_refs，把它负责模块的原始 skill 原文逐字拼进 system_prompt（模型只做映射，服务端保真拼接）
-function attachSkillModuleContent(team, modules) {
-  const byId = new Map(modules.map((m) => [m.id, m]));
-  for (const agent of team.agents || []) {
-    const refs = (Array.isArray(agent.module_refs) ? agent.module_refs : []).map(String).filter((r) => byId.has(r));
-    if (!refs.length) continue;
-    const blocks = refs.map((r) => { const mo = byId.get(r); return `===== 你负责的模块：${mo.title}（${mo.file}）=====\n${mo.body}`; });
-    agent.system_prompt = `${String(agent.system_prompt || "").trim()}\n\n【你负责步骤的原始 Skill 原文——以下命令、参数、顺序、模板、判断条件逐字遵守，不得改写或省略】\n\n${blocks.join("\n\n")}`;
-  }
-  return team;
-}
 
-function formatSkillModuleOutline(modules) {
-  if (!modules.length) return "（未识别到 Markdown 标题；请按 skill 的语义功能模块自行拆分）";
-  return modules.map((m, i) =>
-    `${i + 1}. [${m.id}] ${m.file} / ${m.title}`
-  ).join("\n");
-}
 
-function buildTeamGlobalSkill(spec) {
-  const sources = normalizeSkillSources(spec.skill_sources);
-  const originalSkills = sources.length
-    ? `# 原始 Skill 文件（完整原文）\n\n${sources.map((source) =>
-        `===== ORIGINAL SKILL FILE: ${source.name} =====\n${source.content}`
-      ).join("\n\n")}`
-    : "# 原始 Skill 文件\n\n本团队由点将生成，以下成员完整定义共同构成团队 Skill。";
-  const members = (spec.agents || []).map((agent, index) =>
-    `## 成员 ${index + 1}：${agent.name}（${agent.id}）
 
-- 图标：${agent.emoji || ""}
-- 角色：${agent.role || ""}
-- 人设：${agent.persona || ""}
-- 功能模块：${(agent.module_refs || []).join("、") || "未显式标注"}
-- 独立模型：${agent.model || "继承将军模型"}
-- 独立工具：${(agent.tools || []).join("、") || "无"}
-- 危险标记：${agent.risk?.level === "danger" ? `${agent.risk.summary || "包含高危操作"}${agent.risk.operations?.length ? `（${agent.risk.operations.join("；")}）` : ""}` : "无"}
-- DAG 展示上游：${(agent.depends_on || []).join("、") || "无"}
 
-### 成员执行契约
 
-${agent.system_prompt || ""}`
-  ).join("\n\n");
-  const bp = spec.blueprint;
-  const blueprintBlock = bp && (bp.tasks?.length || bp.goal)
-    ? `\n## 作战蓝图（与用户确认过，主控按此调度与验收）\n\n目标：${bp.goal || spec.summary || ""}\n\n### 任务与验收标准\n${
-        (bp.tasks || []).map((t, i) => `${i + 1}. ${t.title}：${t.detail}\n   - 验收：${t.acceptance || "（未给出，主控按目标自判）"}`).join("\n")
-      }${
-        (bp.external_platforms || []).length
-          ? `\n\n### 已确认的外部平台\n${bp.external_platforms.map((p) => `- ${p.capability} → ${p.recommended}${p.env_key ? `（凭证：${p.env_key}）` : ""}`).join("\n")}`
-          : ""
-      }\n`
-    : "";
-  const evoBlock = (spec.evolution_log || []).length
-    ? `\n## 团队演进记录（对话中沉淀的全局补充规则，全员遵守，优先级高于上面的原始定义）\n${spec.evolution_log.map((e) => `- [${e.at}]${e.by ? ` ${e.by}：` : " "}${e.note}`).join("\n")}\n`
-    : "";
-  return `# 团队全局 Skill：${spec.team_name || "无名战队"}
 
-## 团队目标
-
-${spec.summary || ""}
-${blueprintBlock}${evoBlock}
-${originalSkills}
-
-# 全部成员定义
-
-${members}
-
-# 主控职责
-
-团队主 Agent 必须完整理解以上 Skill 与所有成员能力，负责决定调用哪个成员、提供哪些已完成产出、是否返工、是否询问用户以及何时完成。成员独立运行、独立使用其被授予的工具并独立提交结果。DAG 仅用于展示团队结构和实时作战状态，不是调度权限或固定执行顺序。`;
-}
-
-function inferAgentRole(agent, name) {
-  const explicit = String(agent.role || agent.title || agent.description || "").trim();
-  if (explicit && !["完成分内工作", "完成任务", "执行任务"].includes(explicit)) return explicit;
-  const prompt = String(agent.system_prompt || agent.prompt || "").trim();
-  const match = prompt.match(/(?:你(?:主要)?负责|职责(?:是|：)|负责的是|负责)\s*([^。\n]{2,100})/);
-  let role = match?.[1] || prompt.split(/\n+/).find((line) => line.trim()) || "";
-  role = role.replace(/^[：:，,\s]+|[。；;，,\s]+$/g, "").trim();
-  if (role.length > 72) role = role.slice(0, 72) + "…";
-  return role || `${name}：执行所负责阶段并交付原始 skill 规定的产物`;
-}
-
-function normalizeAgentRisk(raw) {
-  const r = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  const level = String(r.level || "").toLowerCase() === "danger" ? "danger" : "none";
-  const operations = Array.isArray(r.operations)
-    ? r.operations.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 5)
-    : [];
-  const summary = String(r.summary || "").trim();
-  if (level !== "danger" || (!summary && !operations.length)) {
-    return { level: "none", summary: "", operations: [] };
-  }
-  return {
-    level: "danger",
-    summary: summary || operations[0],
-    operations,
-  };
-}
-
-// 模型（尤其非 Claude）可能漏字段、id 不规范、依赖指向不存在的人——这里统一整形兜底
-function normalizeSpec(raw, options = {}) {
-  raw = unwrapTeamSpec(raw);
-  if (!raw || typeof raw !== "object" || !Array.isArray(raw.agents) || raw.agents.length === 0) {
-    throw new Error("模型没有返回有效的团队配置，请重试或换个描述。");
-  }
-  const skillSources = normalizeSkillSources(raw.skill_sources);
-  const preserveGraph = options.preserveGraph === true || skillSources.length > 0;
-  const graph = raw.graph && typeof raw.graph === "object" && !Array.isArray(raw.graph) ? raw.graph : {};
-  const idMap = new Map(); // 原始 id -> 规范化 id
-  const used = new Set();
-  const agents = raw.agents.map((a, i) => {
-    a = a && typeof a === "object" ? a : {};
-    let id = String(a.id || a.name || `agent-${i + 1}`).toLowerCase().trim()
-      .replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || `agent-${i + 1}`;
-    let uid = id, n = 2;
-    while (used.has(uid)) uid = `${id}-${n++}`;
-    used.add(uid);
-    if (a.id != null) idMap.set(String(a.id), uid);
-    if (a.name != null) idMap.set(String(a.name), uid); // 有的模型在 depends_on 里写名字而不是 id
-    // 名字里若带了开头 emoji（模型常把角色 emoji 放进 name），把它提出来当唯一图标、并从名字里去掉，避免"🤖 📝 名字"两个图标
-    let nm = String(a.name || uid);
-    let em = String(a.emoji || "");
-    const led = splitLeadingEmoji(nm);
-    if (led.emoji) { em = led.emoji; nm = led.rest || `军士${i + 1}`; }
-    if (!em) em = "🤖";
-    const role = inferAgentRole(a, nm);
-    return {
-      id: uid,
-      name: nm,
-      emoji: em,
-      role,
-      persona: String(a.persona || ""),
-      system_prompt: String(a.system_prompt || a.prompt || `你是「${nm}」，职责：${role}。请严格按原始要求完成并直接输出交付物。`),
-      tools: Array.isArray(a.tools) ? [...new Set(a.tools.map(String))].filter((t) => REAL_TOOL_NAMES.includes(t)) : [],
-      model: a.model ? String(a.model) : "",
-      risk: normalizeAgentRisk(a.risk),
-      module_refs: Array.isArray(a.module_refs) ? [...new Set(a.module_refs.map(String).filter(Boolean))] : [],
-      _raw_deps: Array.isArray(a.depends_on)
-        ? a.depends_on.map(String)
-        : (Array.isArray(graph[a.id]?.depends_on) ? graph[a.id].depends_on.map(String) : []),
-    };
-  });
-  for (const a of agents) {
-    a.depends_on = [...new Set(a._raw_deps.map((d) => idMap.get(d) || d))]
-      .filter((d) => d !== a.id && used.has(d));
-    delete a._raw_deps;
-  }
-  // 模型偶尔返回一盘散沙（完全没有依赖）：DAG 至少要能展示作战关系。
-  // 这里只按成员顺序补展示链路，不拆解或改写原始 skill；Harness 调度仍可动态决定真实执行路径。
-  if (agents.length > 1 && agents.every((a) => a.depends_on.length === 0)) {
-    for (let i = 1; i < agents.length; i++) agents[i].depends_on = [agents[i - 1].id];
-    console.error("[normalize] 模型没有给出任何依赖关系，已按成员顺序补充 DAG 展示链路。");
-  }
-  const normalized = {
-    // 保留团队稳定 id（记忆/上下文按它隔离，避免不同团队同名时哈希撞车→串台）
-    ...(raw.id != null && String(raw.id).trim() ? { id: String(raw.id) } : {}),
-    team_name: String(raw.team_name || "无名战队"),
-    emoji: String(raw.emoji || "⚔"),
-    summary: String(raw.summary || raw.description || ""),
-    last_task: raw.last_task ? String(raw.last_task) : "",
-    main_model: raw.main_model ? String(raw.main_model) : "", // 将军使用的 Harness 主控模型；成员不指定时也继承它
-    orchestration: "harness", // 旧配置兼容字段：执行统一由 Harness 主控，DAG 仅用于结构与状态展示
-    ...(raw.global_skill ? { global_skill: String(raw.global_skill) } : {}),
-    // 团队级凭证（用户级，绑在团队上）：运行时注入到该团队工具的环境，如 ELEVENLABS_API_KEY 给配音用。
-    // 接受两种形态：对象 {KEY:val} 或数组 [{key,value}]（军师导入 skill 时用数组提取）。
-    secrets: toSecretsObject(raw.secrets),
-    agents,
-  };
-  const origin = inferTeamOrigin(raw);
-  if (origin) normalized.origin = origin;
-  if (raw.blueprint && typeof raw.blueprint === "object") normalized.blueprint = normalizeBlueprint(raw.blueprint);
-  if (skillSources.length) {
-    normalized.skill_sources = skillSources;
-    normalized.skill_integrity = {
-      mode: "verbatim-v1",
-      files: skillSources.length,
-      sha256: skillSourcesDigest(skillSources),
-    };
-  }
-  // 团队进化标记/演进记录要在重建 global_skill 之前带过来，否则 buildTeamGlobalSkill 会丢掉演进记录
-  if (Array.isArray(raw.evolution_log) && raw.evolution_log.length) normalized.evolution_log = raw.evolution_log.slice(-30);
-  if (raw.evolved) normalized.evolved = true;
-  normalized.global_skill = buildTeamGlobalSkill(normalized);
-  normalized.global_skill_integrity = {
-    mode: "derived-full-v1",
-    sha256: crypto.createHash("sha256").update(normalized.global_skill, "utf8").digest("hex"),
-  };
-  return normalized;
-}
-
-// 把 secrets 归一成 {KEY: value} 对象（支持对象 / [{key,value}] 数组两种输入）
-function toSecretsObject(raw) {
-  if (Array.isArray(raw)) {
-    const o = {};
-    for (const e of raw) { if (e && e.key) o[String(e.key)] = String(e.value != null ? e.value : ""); }
-    return o;
-  }
-  if (raw && typeof raw === "object") {
-    return Object.fromEntries(Object.entries(raw)
-      .filter(([k, v]) => k && v != null && typeof v !== "object")
-      .map(([k, v]) => [String(k), String(v)]));
-  }
-  return {};
-}
 
 // 用 claude-code CLI 跑一次性出文本（设计阶段用，走订阅）。传 onThinking 时用 stream-json 实时吐思考。
 function claudeCodeOnce(system, user, modelArg, onThinking) {
@@ -1666,20 +1042,6 @@ async function designTeam(description, designModel, send) {
 }
 
 // ========== 点兵阶段：用户确认蓝图后，按蓝图组建执行团队 ==========
-const STAFF_SYSTEM = `你是「点将台」的首席团队架构师。用户已经和你一起把一份【作战蓝图】确认好了——目标、任务清单（含验收标准）、要用的工具、要接的外部平台，以及用户对若干关键问题的拍板。现在请严格按这份已确认的蓝图组建执行团队。
-
-落地蓝图（最高优先级）：
-1. 团队必须覆盖蓝图里的每一个任务：每个任务至少由一名成员负责，成员的 role 要写清它负责蓝图里的哪个任务、对应的验收标准是什么。不要新增蓝图之外的工作，也不要漏掉任务。
-2. 工具按蓝图 tools_needed 授予——只有真正要跑命令 / 读写文件 / 调外部平台的成员才给 shell / write_file / read_file；纯策划、撰写的成员给 []。
-3. 用户已确认的外部平台要写进相关成员的 system_prompt：写明用哪个平台、怎么调；凭证由系统通过环境变量注入，提示词里只引用 env_key 名（如 \${ELEVENLABS_API_KEY}），绝不要写死真实 key。
-4. 用户对 open_questions 的回答是硬约束，必须体现在对应成员的职责与提示词里。
-
-团队结构要求：
-5. 设计 3~8 个 agent，各有清晰分工，避免职责重叠；团队要有真实层级（前线产出 → 中层聚合 → 收尾整合），依赖链至少 3 层，禁止所有人都直接挂在同一个收尾人身上。
-6. 必须有且只有一个"收尾"agent（没有任何人依赖它），整合直接下属产出，输出最终交付物。
-7. 每个 agent：id（小写英文）；name（优先使用贴合职责、易懂的军队或军帐风格中文称号，如斥候、参军、校尉、主簿、先锋、军需官、督军等，禁止含 emoji / 图标）；emoji（一个代表性 emoji，界面唯一图标）；role（一句话职责，点明负责的蓝图任务）；persona（性格风格 1~2 句）；system_prompt（200~400 字完整系统提示词：身份专长、性格、具体职责、对输出结构 / 深度 / 格式的明确要求，并落实其负责任务的验收标准）；tools（真执行工具名数组，纯创意成员留 []）；model（留空字符串继承将军模型）。depends_on 列出通常给它供料的同事 id，没有就留空数组。
-8. team_name 简短有力，summary 一段话说明团队如何分层协作完成蓝图目标。system_prompt 里不要提"等待上游输入"之类流程细节——运行时会自动把上游产出交给它。
-9. 工具目录只能从这三个选，不要发明：shell（跑命令，如 curl 调配音、ffmpeg 合成、puppeteer 渲帧）、write_file（写产物文件）、read_file（读工作目录文件）；给了 shell 的成员通常一并给 write_file 和 read_file。`;
 
 async function staffTeam(rawBlueprint, description, designModel, send) {
   const blueprint = normalizeBlueprint(rawBlueprint);
@@ -1720,40 +1082,7 @@ async function staffTeam(rawBlueprint, description, designModel, send) {
 }
 
 // 导入 skill 点将：军师只做团队范式拆分；完整原始 skill 保留在团队全局 Skill 中。
-const SKILL_DESIGN_SYSTEM = `你是「点将台」的团队拆分员。用户给你一套【已经调试好、测试通过的 skill】（一个或多个）。你的权限仅限于把原流程映射成团队成员和依赖图，不得重新设计、优化、改写或补充 skill 的功能。
 
-怎么做：
-1. 拆分单位是 skill 原文里的【独立功能模块】，不是行号、不是段落长度、不是任意切片。通读整套 skill 和“功能模块纲要”，识别原文中已经存在的阶段、角色、并行关系、确认点、输入输出和交接顺序。
-2. 每个成员必须负责一个或多个完整功能模块，并在 module_refs 中填写这些模块 id。紧密耦合、不可独立交付的模块可以合并给同一成员；一个不可拆的原子模块不能拆成多个成员；不要创造原文没有的新功能模块。
-3. 团队结构必须语义映射这些原始模块，不能为了团队好看而新增、删除、合并、调序或改造任何步骤。若原流程本来有多个并行终点，不要强行添加新的收尾步骤。
-4. name / emoji / persona 可以做团队化包装；name 优先使用贴合职责、易懂的军队或军帐风格称号，如斥候、参军、校尉、主簿、先锋、军需官、督军等；role 必须明确写出该成员负责的原始功能模块和交付物，禁止留空，禁止写“完成分内工作”“执行任务”等空话。
-5. system_prompt 写该成员在团队中的职责边界、输入、输出和交付标准，但不得重新发明原 skill 的功能；需要引用原始规则时用“遵守团队全局 Skill 中的原始规则”表达，不要切分、摘抄或改写原文。
-6. depends_on 表示 DAG 展示上游：按原 skill 的实际模块顺序、并行关系和交付关系填写；如果不确定，保持模块顺序即可，不要编造不存在的强依赖。
-7. tools：需要真正跑命令行 / 读写文件的成员才给 shell / write_file / read_file，纯策划/撰写给 []。
-8. risk：由你在拆分阶段判断该成员职责是否包含高危操作。不要靠关键词机械判断，要理解成员真实职责、原始 skill 语义与工具权限。只有成员职责明确包含删除、销毁、清空、覆盖不可恢复数据/文件/资源等真实破坏性动作时才标 {level:"danger"}，并在 summary / operations 中简要说明；普通读取、写新文件、生成稿件、渲染、分析不要标。
-9. 凭证提取：如果 skill 原文里出现了 API key / 凭证（如 sk- 开头的 key、xi-api-key、各种 *_API_KEY、token 等），把它们提取到团队顶层的 secrets 数组，每条 {key: 环境变量名（如 ELEVENLABS_API_KEY）, value: 真实值}。只提取 skill 里真实出现的，不要编造；没有就给空数组。
-10. team_name 与 summary：summary 提炼这套 skill 是做什么的、最终交付什么。
-11. 成员图标规则：name 只能是纯文字名字，禁止包含 emoji、图标或装饰符号；emoji 字段填写恰好一个代表性 emoji，作为界面显示的唯一成员图标。军队风格只用于称谓包装，不得改变原始 skill 的任何功能、步骤或执行要求。
-12. 原文忠实性是最高规则：用户附加说明只能补充本次团队命名或分工偏好，不得覆盖、修改或“优化”原 skill。
-
-总之：你只画组织结构，不碰生产配方。`;
-
-const SKILL_TEAM_SCHEMA = JSON.parse(JSON.stringify(TEAM_SCHEMA));
-SKILL_TEAM_SCHEMA.properties.agents.minItems = 1;
-SKILL_TEAM_SCHEMA.properties.agents.maxItems = 24;
-SKILL_TEAM_SCHEMA.properties.agents.items.required = [
-  ...new Set([...SKILL_TEAM_SCHEMA.properties.agents.items.required, "module_refs"]),
-];
-SKILL_TEAM_SCHEMA.properties.agents.items.properties.module_refs = {
-  type: "array",
-  minItems: 1,
-  description: "该成员负责的独立功能模块 id，必须来自用户提供的功能模块纲要；不要填行号或自造 id。",
-  items: { type: "string" },
-};
-SKILL_TEAM_SCHEMA.properties.agents.items.properties.role.description =
-  "明确的原始功能模块职责和交付物；禁止空话，禁止写完成分内工作";
-SKILL_TEAM_SCHEMA.properties.agents.items.properties.system_prompt.description =
-  "写清成员职责边界、输入、输出与交付标准；必须遵守团队全局 Skill 中完整原文，不要切分、摘抄或改写原始 skill。";
 
 async function designFromSkills(skills, description, designModel, send) {
   const skillSources = normalizeSkillSources(skills);
@@ -1796,16 +1125,6 @@ async function designFromSkills(skills, description, designModel, send) {
 }
 
 // ---------- 对话式改成员（用该成员当前的模型） ----------
-const EDIT_AGENT_SCHEMA = {
-  type: "object", additionalProperties: false,
-  required: ["name", "emoji", "role", "persona", "system_prompt", "tools", "_changed"],
-  properties: {
-    name: { type: "string" }, emoji: { type: "string" }, role: { type: "string" },
-    persona: { type: "string" }, system_prompt: { type: "string" },
-    tools: { type: "array", items: { type: "string", enum: ["shell", "write_file", "read_file"] } },
-    _changed: { type: "string", description: "一句话说明这次改了哪些地方" },
-  },
-};
 // 用成员当前选择的模型，按用户指令改写该成员的设定；只回改后的字段（不动 id/depends_on/model/lines）
 async function editAgentViaChat(agent, instruction, teamMainModel) {
   const { eff, model } = resolveDesign(agent.model || teamMainModel || ""); // 不可用会抛错阻断
@@ -2064,7 +1383,6 @@ const TOOL_REGISTRY = {
 
 const TOOL_NAMES = Object.keys(TOOL_REGISTRY);
 // 工具目录里把"真执行"工具暴露给前端勾选/路由；ask_user 是自动可用的交互工具，不计入
-const REAL_TOOL_NAMES = ["shell", "write_file", "read_file", "edit_file", "list_dir", "web_fetch"];
 
 // ---------- 工具授予策略（组合拳之一：默认授权 + 确定性映射）----------
 // 每个成员默认就补上这些基础工具（读/写/精确改/列目录/抓网页），避免"我没有 xx 工具"这类常见失败。
@@ -2602,7 +1920,6 @@ async function modelTurn({ eff, model, system, messages, toolDefs, onThinking, o
 }
 
 // 所有走 harness 的模型调用统一注入：默认用中文（含思考过程 thinking 与交付内容），除非用户明确要求其他语言。
-const HARNESS_LANG_DIRECTIVE = "\n\n# 输出语言（最高优先级）\n默认全程用中文：思考过程（thinking）和最终交付内容都必须用中文，禁止默认用英文思考或输出。只有当用户明确要求用其他语言时，才改用用户指定的语言。";
 
 async function runCliTerminalHarness({ id, system, input, toolDefs, model, eff, send, ctx, opts = {} }) {
   const tool = toolDefs.find((t) => t.name === opts.terminalTool);
