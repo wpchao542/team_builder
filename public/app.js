@@ -2947,7 +2947,7 @@ function renderFinalMeta(next = {}) {
   const el = $("final-meta");
   if (!el) return;
   finalMetaState = { ...finalMetaState, ...next };
-  const { deliveryMember = null, missingMembers = [], usage = null, usageReady = false } = finalMetaState;
+  const { deliveryMember = null, missingMembers = [], usage = null, usageReady = false, usageHasUnknown = false } = finalMetaState;
   const missing = normalizeMemberRefs(missingMembers);
   const missingText = missing.length
     ? missing.map((item) => esc(memberRefLabel(item))).join("、")
@@ -2956,7 +2956,7 @@ function renderFinalMeta(next = {}) {
     `<span class="final-pill">交付成员：<b>${esc(memberRefLabel(deliveryMember || memberRefById(ORCH_ID)))}</b></span>`,
     `<span class="final-pill ${missing.length ? "warn" : "ok"}">未完成成员：<b>${missingText}</b></span>`,
   ];
-  if (usageReady) rows.push(`<span class="final-pill">总 Token：<b>${esc(fmtBattleTokens(usage))}</b></span>`);
+  if (usageReady) rows.push(`<span class="final-pill">总 Token：<b>${esc(fmtBattleTokens(usage, usageHasUnknown))}</b></span>`);
   el.innerHTML = rows.join("");
 }
 function resolveFinalDelivery(finalId, meta = {}) {
@@ -2999,7 +2999,7 @@ function fmtBattleDuration(ms) {
   if (m) return `${m}m ${s}s`;
   return `${s}s`;
 }
-function fmtBattleTokens(usage) {
+function fmtBattleTokens(usage, hasUnknown = false) {
   const totalRaw = usage?.total_tokens;
   const total = Number(totalRaw);
   if (totalRaw == null || !Number.isFinite(total)) return "未回传";
@@ -3010,7 +3010,9 @@ function fmtBattleTokens(usage) {
   const parts = [];
   if (inputRaw != null && Number.isFinite(input)) parts.push(`入 ${input.toLocaleString()}`);
   if (outputRaw != null && Number.isFinite(output)) parts.push(`出 ${output.toLocaleString()}`);
-  return `${total.toLocaleString()} tokens${parts.length ? `（${parts.join(" / ")}）` : ""}`;
+  // 有步骤未回传 token 时，已统计的只是下限，用 ≥ 标明（如 claude-code/codex 订阅模型不回传用量）
+  const prefix = hasUnknown ? "≥ " : "";
+  return `${prefix}${total.toLocaleString()} tokens${parts.length ? `（${parts.join(" / ")}）` : ""}`;
 }
 function battleStepTitle(step) {
   const base = step.title || `第 ${step.index || step.call_index || 1} 步`;
@@ -3042,7 +3044,7 @@ function renderBattleReport(report) {
     return;
   }
   if (empty) empty.style.display = "none";
-  $("battle-total-tokens").textContent = fmtBattleTokens(report.usage);
+  $("battle-total-tokens").textContent = fmtBattleTokens(report.usage, report.unknown_token_steps > 0);
   $("battle-total-duration").textContent = fmtBattleDuration(report.duration_ms);
   $("battle-total-steps").textContent = `${members.length} 人 · ${members.reduce((n, m) => n + (m.steps?.length || 0), 0)} 步`;
   $("battle-meta").textContent = report.unknown_token_steps
@@ -3052,7 +3054,7 @@ function renderBattleReport(report) {
     <details class="battle-member">
       <summary>
         <span class="battle-name">${esc(m.emoji || "🤖")} ${esc(m.name || m.id)}</span>
-        <span class="battle-pill">${fmtBattleTokens(m.usage)}</span>
+        <span class="battle-pill">${fmtBattleTokens(m.usage, m.unknown_token_steps > 0)}</span>
         <span class="battle-pill">${fmtBattleDuration(m.duration_ms)}</span>
         <span class="battle-pill">${m.steps.length} 步</span>
       </summary>
@@ -3074,7 +3076,7 @@ function renderBattleReport(report) {
 }
 function applyFinalBattleUsage(report) {
   if (!$("final") || $("final").style.display === "none") return;
-  renderFinalMeta({ usage: report?.usage || null, usageReady: true });
+  renderFinalMeta({ usage: report?.usage || null, usageReady: true, usageHasUnknown: report?.unknown_token_steps > 0 });
 }
 function battleRunDisplayName(row) {
   return runDisplayTitle(row) || row.team_name || "未命名记录";
@@ -3090,7 +3092,7 @@ function renderBattleDashboardList(list, selectedId) {
     <button type="button" class="battle-run-item${row.run_id === selectedId ? " active" : ""}" data-battle-run="${esc(row.run_id)}">
       <span class="battle-run-title">${esc(row.emoji || "⚔")} ${esc(battleRunDisplayName(row))}</span>
       <span class="battle-run-meta">${esc(row.team_name || "无名团队")} · ${esc(fmtRunTime(row.started_at))} · ${esc(runStatusLabel(row.status))}</span>
-      <span class="battle-run-cost">${esc(fmtBattleTokens(row.usage))} · ${esc(fmtBattleDuration(row.duration_ms))}</span>
+      <span class="battle-run-cost">${esc(fmtBattleTokens(row.usage, row.unknown_token_steps > 0))} · ${esc(fmtBattleDuration(row.duration_ms))}</span>
     </button>
   `).join("");
   box.querySelectorAll("[data-battle-run]").forEach((el) => {
