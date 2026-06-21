@@ -124,12 +124,15 @@ npm run mock    # 演示模式，不调真实 API
 server.js            HTTP 服务 + harness 引擎 + provider 对接 + 工具 + 运行/持久化（运行时核心）
 lib/prompts.js       全部系统提示词与 JSON Schema（纯数据）
 lib/skills.js        团队配置 / skill 原文 / 蓝图 的归一与拆分（纯函数）
+lib/planning.js      将军（Harness 主控）的纯决策层：候选 / 校验 / schema / mock / 思考文案
 lib/constants.js     跨模块共享小常量
-public/index.html    前端（单文件，无构建步骤）
+public/index.html    前端骨架（结构标记）
+public/styles.css    前端样式
+public/app.js        前端逻辑（无构建步骤，浏览器直接加载）
 test/harness.test.js 纯函数单测
 ```
 
-> 后端正在从单文件渐进式拆分为 `lib/` 模块：先抽出零运行时依赖的「纯数据 / 纯函数」层（提示词、schema、归一逻辑），运行时核心（providers / harness / orchestrator / 运行存储 / 路由）仍在 `server.js`，后续按同样的「抽一块、跑一遍测试」方式继续拆。
+> 后端正在从单文件渐进式拆分为 `lib/` 模块：先抽出零运行时依赖的「纯数据 / 纯函数」层（提示词、schema、归一逻辑、纯决策校验），运行时核心（providers / harness / orchestrator / 运行存储 / 路由）仍在 `server.js`，后续按同样的「抽一块、跑一遍测试」方式继续拆。前端也已从单文件 `index.html` 拆成 结构 / 样式 / 逻辑 三个文件。
 
 ---
 
