@@ -5,6 +5,7 @@ const {
   normalizeSpec,
   harnessCandidates,
   validateHarnessDecision,
+  normalizeDecisionAliases,
   nextMockHarnessDecision,
   harnessDecisionTool,
   HARNESS_DECISION_TOOL,
@@ -214,6 +215,32 @@ test("Harness 可调度任意成员，且只接收已完成成员的结果", () 
   }, outputs);
   assert.equal(invalid.ok, false);
   assert.match(invalid.error, /尚未完成/);
+});
+
+test("模型把动作字段嵌套进 {action,dispatch:{...}} 时能摊平并通过校验", () => {
+  const spec = normalizeSpec(branchSpec(), { preserveGraph: true });
+  // 真实事故：claude-code/opus 返回 { action:"dispatch", dispatch:{ member_id, instruction } }
+  const nested = normalizeDecisionAliases({
+    action: "dispatch",
+    dispatch: { member_id: "step-1", instruction: "执行 Step 0 改写文章" },
+  });
+  assert.equal(nested.member_id, "step-1");
+  assert.equal(nested.instruction, "执行 Step 0 改写文章");
+  const checked = validateHarnessDecision(spec, nested, {});
+  assert.equal(checked.ok, true);
+  assert.equal(checked.member.id, "step-1");
+
+  // 并行的嵌套数组形态：{ action:"dispatch_parallel", dispatch_parallel:[...] }
+  const par = normalizeDecisionAliases({
+    action: "dispatch_parallel",
+    dispatch_parallel: [
+      { member_id: "step-3", upstream_ids: ["step-2"], instruction: "并行 A" },
+      { member_id: "step-4", upstream_ids: ["step-2"], instruction: "并行 B" },
+    ],
+  });
+  assert.equal(par.parallel_calls.length, 2);
+  const pchecked = validateHarnessDecision(spec, par, { "step-1": "x", "step-2": "y" });
+  assert.equal(pchecked.ok, true);
 });
 
 test("Harness 支持独立成员并行执行和并行返工", () => {

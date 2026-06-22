@@ -3279,7 +3279,7 @@ if (require.main === module) {
 module.exports = {
   TOOL_REGISTRY, normalizeSpec, topoWaves, buildAgentInput,
   normalizeSkillSources, skillSourcesDigest, extractSkillModules, formatSkillModuleOutline,
-  harnessCandidates, validateHarnessDecision, nextMockHarnessDecision,
+  harnessCandidates, validateHarnessDecision, normalizeDecisionAliases, nextMockHarnessDecision,
   buildHarnessMemberInput, harnessDecisionSchema, harnessDecisionTool, HARNESS_DECISION_TOOL, buildTeamGlobalSkill,
   harnessRoundThinking, harnessDecisionThinking,
   injectTeamConventions, staleDownstreamMembers, orchestratorUserInputsFromEvents, mergeConversations, messagesChars, extractArtifactPaths,
