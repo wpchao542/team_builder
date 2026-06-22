@@ -1865,10 +1865,19 @@ async function runCliTerminalHarness({ id, system, input, toolDefs, model, eff, 
   const tool = toolDefs.find((t) => t.name === opts.terminalTool);
   if (!tool) throw new Error(`runHarness terminalTool "${opts.terminalTool}" 未在 toolDefs 中声明。`);
   system = `${system}${HARNESS_LANG_DIRECTIVE}`; // CLI 终止工具模式也统一中文
+  // CLI（claude-code/codex）不像原生 tool_calls 那样被 input_schema 强约束，
+  // 必须把参数 schema 和"字段平铺在顶层、不要嵌套"的契约明确写进提示，否则模型可能
+  // 自行把字段包进与动作同名的子对象（如 {"action":"dispatch","dispatch":{...}}），导致校验失败。
   const submitRule = `# 提交方式
 
-你现在运行在统一 runHarness 底座中。本轮必须等同于调用工具 \`${tool.name}\`，只提交该工具参数对应的 JSON 对象。
-不要输出解释、Markdown、代码围栏或普通文本。`;
+你现在运行在统一 runHarness 底座中。本轮必须等同于调用工具 \`${tool.name}\`，只提交一个 JSON 对象，且严格符合下面这份参数 schema（这就是该工具的完整参数定义）：
+
+${JSON.stringify(tool.schema)}
+
+硬性要求：
+1. 所有字段直接放在 JSON 的【顶层】，严格照上面的 schema；**不要**把它们再包进任何子对象——例如不要写 {"action":"dispatch","dispatch":{...}} 或 {"params":{...}}，字段必须平铺在顶层（正确：{"action":"dispatch","member_id":"…", …}）。
+2. schema 中 required 的字段必须全部给出；本轮用不到的填空字符串 "" 或空数组 []。
+3. 只输出这个 JSON 对象本身，不要解释、不要 Markdown、不要代码围栏、不要任何普通文本。`;
   const onThinking = (text) => send && send({ type: "agent_thinking", id, text });
   const startedAt = Date.now();
   let raw;
