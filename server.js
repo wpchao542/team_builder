@@ -30,6 +30,7 @@ const CONFIG_RUNTIME_KEYS = [
 
 loadDotEnv();
 loadConfig(); // config.json：统一存放各种 key 与模型配置（会注入 process.env，shell 工具的 curl 也能用）
+P.applyEnvConfig(); // 关键：providers 在 require 时已按当时 env 初始化，这里用 loadConfig 注入后的 env 校正，否则 config.json 的 PROVIDER/MODEL/ENABLE_* 失效
 // 这些都用 let：配置中心保存后可在运行时重新派生（它们都在调用时读取，改了立即生效）
 
 // 运行时可改的系统默认模型（null = 用启动时按 provider 推断的）。界面可改并写回 config.json。
