@@ -124,7 +124,8 @@ runHarness（唯一引擎：怎么跑）
 ## 代码结构
 
 ```
-server.js            HTTP 服务 + harness 引擎 + provider 对接 + 工具 + 调度（运行时核心）
+server.js            HTTP 服务 + harness 引擎 + 工具 + 调度（运行时核心）
+lib/providers.js     模型 provider 运行时：状态 + 模型注册表 + 各家 IO（anthropic/ollama/百炼/claude-code/codex）
 lib/prompts.js       全部系统提示词与 JSON Schema（纯数据）
 lib/skills.js        团队配置 / skill 原文 / 蓝图 的归一与拆分（纯函数）
 lib/planning.js      将军（Harness 主控）的纯决策层：候选 / 校验 / schema / mock / 思考文案
