@@ -2754,6 +2754,8 @@ function readBody(req) {
 // ---------- 运行记录 / 运行中并发 store（出征与请求解耦：可断开/重连，多团队同时跑）----------
 function startRun(spec, task, opts = {}) {
   const runId = opts.runId || `${spec.id || "team"}-${Date.now().toString(36)}`;
+  // 记忆按出征实例隔离：本次出征线的记忆 key = runId（续聊/再战复用同一 runId → 同一记忆线；全新出征是新 runId → 全新记忆）。
+  spec.mem_scope = runId;
   // 只有「历史再出征」(显式传 memorySnapshot) 和「连续对话」(continuation) 才读记忆；全新出征不读。
   const memorySnapshot = opts.memorySnapshot || (opts.continuation ? readTeamMemory(spec) : null);
   const old = opts.runId ? getRunRecord(opts.runId) : null;
@@ -2951,6 +2953,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const spec = bodySpec && typeof bodySpec === "object" ? normalizeSpec(bodySpec) : normalizeSpec(old.spec);
+      spec.mem_scope = old.runId; // 续聊复用同一出征线的记忆（read snapshot + 后续写回都按 old.runId）
       const content = text.trim();
       const target = normalizeConversationTarget(spec, agentId);
       const continuation = { sourceRunId: old.runId, target, text: content };
@@ -3072,6 +3075,7 @@ const server = http.createServer(async (req, res) => {
       const spec = body.spec && typeof body.spec === "object"
         ? normalizeSpec(body.spec)
         : ((old.teamId && readTeamSpecById(old.teamId)) || normalizeSpec(old.spec));
+      spec.mem_scope = old.runId; // 再战复用原出征线的记忆
       const memorySnapshot = old.memorySnapshot || readTeamMemory(spec);
       const rec = startRun(spec, task, { runId: old.runId, title: old.title || "", sourceRunId: old.sourceRunId || "", memorySnapshot });
       return json(200, { ok: true, run_id: rec.runId, updated_run_id: old.runId });
