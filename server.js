@@ -766,7 +766,7 @@ ${system || "严格完成用户任务。"}
 # 工具边界
 
 ${allowTools
-    ? "只可在当前工作目录内使用完成任务所必需的命令和文件操作，并遵守上面的工具授权与交付约束。"
+    ? "可使用完成任务所必需的命令和文件操作：默认在当前工作目录内进行，必要时也可写到任务指定的路径（含绝对路径）；遵守上面的工具授权与交付约束。"
     : "本轮禁止调用 shell、修改文件或使用其他工具，只能直接生成回答。"}
 
 # 本轮任务
@@ -1022,7 +1022,7 @@ function injectTeamConventions(spec) {
   const goal = String(spec.summary || spec.team_name || "").trim();
   const block = `\n\n${TEAM_CONVENTION_MARKER}（全体成员共同遵守，系统统一注入）】\n` +
     (goal ? `- 团队目标：${goal}\n` : "") +
-    `- 所有文件类产物统一存到本次出征的工作目录（= 环境变量 $BASE_DIR，运行时会把具体路径告诉你），不要散落到别处；skill 原文里若写了 ~/Documents/... 之类绝对输出路径，一律改到 $BASE_DIR 下同名文件。文件命名清晰、稳定、可被下游按名引用。\n` +
+    `- 文件类产物未指定输出位置时，默认存到本次出征的工作目录（= 环境变量 $BASE_DIR，运行时会把具体路径告诉你），命名清晰、稳定、可被下游按相对名引用；若任务 / skill 明确要求写到某个指定路径（含绝对路径），按要求写即可，不必强行改到 $BASE_DIR。\n` +
     `- 交付时在结果里明确写出你产出的文件名 / 相对路径，方便将军与下游成员定位。\n` +
     `- 需要别人的产物时，用将军在“本轮上游产出”里给你的内容，不要凭空假设路径。\n` +
     `- 执行中发现缺命令行依赖（如 ffmpeg / whisper / 某 CLI）时，先用 ask_user 问用户是否安装；用户同意后再用 shell（brew / npm / pip）安装，然后继续；用户不同意或装不上就说明影响，别假装完成。\n` +
@@ -1191,11 +1191,11 @@ const TOOL_REGISTRY = {
     hint: "把内容写入工作目录的文件（口播稿.md / cover.html / 脚本等）",
     spec: {
       name: "write_file",
-      description: "把文本内容写入工作目录下的文件（自动创建父目录）。用于产出口播稿.md、cover.html、渲染脚本、生产笔记等。",
+      description: "把文本内容写入文件（自动创建父目录）。路径相对工作目录或绝对皆可。用于产出口播稿.md、cover.html、渲染脚本、生产笔记等。",
       input_schema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作目录的文件路径" },
+          path: { type: "string", description: "文件路径：传相对路径则相对工作目录（$BASE_DIR）解析，也可传绝对路径写到指定位置。由你按任务需要决定。" },
           content: { type: "string", description: "文件内容" },
         },
         required: ["path", "content"],
@@ -1215,7 +1215,7 @@ const TOOL_REGISTRY = {
     hint: "读取工作目录里的文件内容",
     spec: {
       name: "read_file",
-      description: "读取工作目录下某个文件的文本内容。",
+      description: "读取某个文件的文本内容（路径相对工作目录或绝对皆可）。",
       input_schema: {
         type: "object",
         properties: { path: { type: "string", description: "相对工作目录的文件路径" } },
@@ -1236,7 +1236,7 @@ const TOOL_REGISTRY = {
       input_schema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作目录的文件路径" },
+          path: { type: "string", description: "文件路径：传相对路径则相对工作目录（$BASE_DIR）解析，也可传绝对路径写到指定位置。由你按任务需要决定。" },
           old_string: { type: "string", description: "要被替换的原文（需与文件内容完全一致）" },
           new_string: { type: "string", description: "替换成的新内容" },
           replace_all: { type: "boolean", description: "是否替换所有匹配（默认 false，要求唯一匹配）" },
@@ -1268,7 +1268,7 @@ const TOOL_REGISTRY = {
       input_schema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "可选，相对工作目录的子目录；默认列工作目录根" },
+          path: { type: "string", description: "可选，要列的目录：相对路径相对工作目录，也可传绝对路径；默认列工作目录根" },
           depth: { type: "number", description: "可选，递归深度，默认 2，最大 6" },
         },
       },
@@ -1635,7 +1635,7 @@ function buildAgentInput(task, agent, outputs, ctx = {}) {
     : [];
   if (granted.length && ctx.baseDir) {
     msg += `\n# 你的工具与工作目录\n你被授予了这些可真正执行的工具：${granted.join("、")}。`;
-    msg += `\n工作目录是 \`${ctx.baseDir}\`（shell 命令默认在此执行，文件读写也相对于它）。需要真正产出文件/调用命令时就调用工具去做，别只在文字里描述；做完在交付物里说明产物路径。`;
+    msg += `\n工作目录是 \`${ctx.baseDir}\`（shell 命令默认在此执行；文件路径传相对则相对于它，也可传绝对路径写到指定位置）。需要真正产出文件/调用命令时就调用工具去做，别只在文字里描述；做完在交付物里说明产物路径。`;
   }
   msg += `\n请基于以上信息完成你职责范围内的工作，直接输出你的交付物。`;
   msg += `\n若执行契约要求用户确认，必须在确认点停下：先完整输出当前待确认的原文，再调用 ask_user；若当前模型没有 ask_user 工具，则在末尾明确写“需要用户确认：具体问题”，等待系统取得回复后再继续。不得擅自越过确认点。`;
@@ -2281,8 +2281,8 @@ function buildHarnessMemberInput(task, member, upstreamIds, outputs, instruction
     : [];
   if (granted.length && ctx.baseDir) {
     msg += `\n# 你的工具与工作目录\n你被授予了这些可真正执行的工具：${granted.join("、")}。`;
-    msg += `\n工作目录（即 \`$BASE_DIR\`）= \`${ctx.baseDir}\`：shell 默认在此执行、环境变量 $BASE_DIR 已指向它；write_file/read_file 用相对路径即相对于它。`;
-    msg += `\n**所有产物必须落在这个目录里**：skill 原文里若写了 \`~/Documents/...\` 之类的绝对输出路径，一律改写到 \`$BASE_DIR\` 下的同名文件（命令、参数、模板其余部分照旧不变），保证全部产物都在执行目录、下游能按相对名找到。做完在交付物里说明产物的相对路径。`;
+    msg += `\n工作目录（即 \`$BASE_DIR\`）= \`${ctx.baseDir}\`：shell 默认在此执行、环境变量 $BASE_DIR 已指向它；write_file/read_file 传相对路径即相对于它，也可传绝对路径写到指定位置。`;
+    msg += `\n产物存放：未指定输出位置时，默认放到 \`$BASE_DIR\` 下（命名清晰、稳定，方便下游按相对名引用、将军定位）；若任务 / skill 明确要求写到某个指定路径（含绝对路径），就按要求写，不必强行改到 $BASE_DIR。做完在交付物里说明产物路径。`;
   }
   msg += "\n严格保持你的 system prompt 中定义的原始功能与交付标准，只执行本轮被分配的工作，直接输出最终交付物。";
   msg += "\n# 交付物的富文本格式（结果框会按这些直接渲染，善用它让交付更直观）\n" +
@@ -2333,7 +2333,7 @@ ${completionRule}
 2. upstream_ids 只填本轮确实需要交给成员参考的已完成成员产出，可以为空，也可以跨越 DAG 展示关系。
 3. 当多个成员当前不互相依赖、可以独立产出时，优先用 dispatch_parallel 并行；同一批成员只能引用批次开始前已经完成的结果。
 ${routingRule}
-5. 每个成员是独立子 Agent，拥有自己的模型、system prompt、工具与独立结果框；不得替成员改写其执行契约。
+5. 每个成员是独立子 Agent，拥有自己的模型、system prompt、工具与独立结果框；不得替成员改写其执行契约。**分工边界**：全局性 / 跨成员的事——统一口径、整合汇总各成员产出、跨成员协调、补齐缺口、形成最终交付——由你（将军）亲自统筹（需要长期固化时用 update_team），不要把这类本属全局的活硬塞给某个成员；每个成员只在自己领域职责范围内干活，不要让它去管别人或全局的事。
 6. 成员结果不合格时可以单独返工，也可以把相互独立的返工放入同一 dispatch_parallel 批次；同一成员最多调用 ${HARNESS_MAX_MEMBER_CALLS} 次。
 7. instruction 只说明本轮任务、输入和交付目标；完整 Skill 与成员 system prompt 的规则优先。不得在 instruction 里写“不要提问/禁止向任何对象提问/直接执行不要确认”之类的话——成员若执行契约里有确认点，必须让它在确认点正常停下问用户，你无权替它取消确认。
 ${finishRule}
