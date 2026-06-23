@@ -3046,7 +3046,12 @@ function renderBattleReport(report) {
   if (empty) empty.style.display = "none";
   $("battle-total-tokens").textContent = fmtBattleTokens(report.usage, report.unknown_token_steps > 0);
   $("battle-total-duration").textContent = fmtBattleDuration(report.duration_ms);
-  $("battle-total-steps").textContent = `${members.length} 人 · ${members.reduce((n, m) => n + (m.steps?.length || 0), 0)} 步`;
+  // 将军的"步"=调度轮次，成员的"步"=执行次，单位不同，分开统计避免混淆
+  const orchRow = members.find((m) => m.is_orchestrator);
+  const memberRows = members.filter((m) => !m.is_orchestrator);
+  const orchRounds = orchRow ? orchRow.steps.length : 0;
+  const execCount = memberRows.reduce((n, m) => n + (m.steps?.length || 0), 0);
+  $("battle-total-steps").textContent = `${memberRows.length} 名成员 · 将军调度 ${orchRounds} 轮 · 成员执行 ${execCount} 次`;
   $("battle-meta").textContent = report.unknown_token_steps
     ? `${report.unknown_token_steps} 步模型未回传 token`
     : "token 已按模型回传统计";
@@ -3056,7 +3061,7 @@ function renderBattleReport(report) {
         <span class="battle-name">${esc(m.emoji || "🤖")} ${esc(m.name || m.id)}</span>
         <span class="battle-pill">${fmtBattleTokens(m.usage, m.unknown_token_steps > 0)}</span>
         <span class="battle-pill">${fmtBattleDuration(m.duration_ms)}</span>
-        <span class="battle-pill">${m.steps.length} 步</span>
+        <span class="battle-pill">${m.is_orchestrator ? `${m.steps.length} 轮调度` : `${m.steps.length} 次执行`}</span>
       </summary>
       <div class="battle-steps">
         ${m.steps.map((step) => `
