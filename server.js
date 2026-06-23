@@ -405,7 +405,7 @@ async function designFromSkills(skills, description, designModel, send) {
   ).join("\n\n");
   const user =
     `下面是一套已经调试测试好的 skill（共 ${skillSources.length} 个文本文件）。你只负责按原始 skill 的独立功能模块做成员拆分、职责边界和依赖关系；原始 skill 会完整保留在团队全局 Skill 中。` +
-    (description ? `\n\n用户的额外要求（不得改变原 skill 功能）：${description}` : "") +
+    (description ? `\n\n# 用户对这次组队的要求（请认真采纳：用它决定团队的命名、分工、侧重、模块如何分配给成员；不要改写 skill 的命令/参数/步骤本身）\n${description}` : "") +
     `\n\n# 功能模块纲要（按这些独立模块拆成员，不按行号、不按段落长度）\n${moduleOutline}` +
     `\n\n要求：每个成员的 module_refs 必须引用上面纲要中的模块 id；一个成员可以负责多个紧密关联模块，但不能拆散一个不可独立交付的模块。` +
     `\n\n# 完整原始 Skill（只读执行契约，禁止重写，禁止修改命令、参数、顺序、模板或判断条件）\n\n${content}`;
