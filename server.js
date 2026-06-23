@@ -2460,7 +2460,7 @@ const server = http.createServer(async (req, res) => {
       const ccEnabled = P.claudeCliAvailable && P.ENABLE_CLAUDE_CODE; // 仅在配置中心启用后才算"已配置"
       const codexEnabled = P.codexCliAvailable && P.codexCliLoggedIn && P.ENABLE_CODEX_CLI;
       const models = currentModelRegistry();
-      const defaultEntry = systemDefaultModelEntry(provider);
+      const defaultEntry = systemDefaultModelEntry(P.provider);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({
         tools_enabled: (ALLOW_TOOLS && anthropicAvailable) || ccEnabled || codexEnabled,
@@ -2500,7 +2500,7 @@ const server = http.createServer(async (req, res) => {
       const cliToolsEnabled =
         (P.claudeCliAvailable && P.ENABLE_CLAUDE_CODE) ||
         (P.codexCliAvailable && P.codexCliLoggedIn && P.ENABLE_CODEX_CLI);
-      const defaultEntry = systemDefaultModelEntry(provider);
+      const defaultEntry = systemDefaultModelEntry(P.provider);
       res.end(JSON.stringify({ ok: true, provider: P.provider, default_model: defaultEntry.id, default_model_label: defaultEntry.label,
         anthropic_available: !!P.anthropicClient, tools_enabled: (ALLOW_TOOLS && !!P.anthropicClient) || cliToolsEnabled }));
       return;
