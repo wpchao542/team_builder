@@ -1053,6 +1053,23 @@ function runClaudeCode(agent, userContent, send, ctx = {}, modelArg = "", option
     let cp;
     try { cp = require("child_process").spawn(P.CLAUDE_BIN, args, { cwd, env }); }
     catch (e) { resolve(`无法启动 claude CLI：${e.message}`); return; }
+    // 停战可中断：把本次 claude 子进程登记到运行级 aborters，停战时杀掉它并立即返回（否则成员一直在干、停不下来）
+    const rec = ctx.runId ? runs.get(ctx.runId) : null;
+    const ac = new AbortController();
+    const aborterEntry = { ac, agentId: agent.id };
+    rec?.aborters?.add(aborterEntry);
+    let killTimer = null, settled = false;
+    const finish = (text) => {
+      if (settled) return; settled = true;
+      rec?.aborters?.delete(aborterEntry);
+      if (killTimer) clearTimeout(killTimer);
+      resolve(text);
+    };
+    ac.signal.addEventListener("abort", () => {
+      try { cp.kill("SIGTERM"); } catch {}
+      killTimer = setTimeout(() => { try { cp.kill("SIGKILL"); } catch {} }, 1500);
+      finish(finalText || "[已停战] 已中断 claude-code 成员执行");
+    }, { once: true });
     let buf = "", finalText = "", stderr = "", streamed = false;
     cp.stdout.on("data", (d) => {
       buf += d;
@@ -1081,38 +1098,51 @@ function runClaudeCode(agent, userContent, send, ctx = {}, modelArg = "", option
       }
     });
     cp.stderr.on("data", (d) => { stderr += d; });
-    cp.on("error", (e) => resolve(`无法启动 claude CLI：${e.message}（确认已 claude login，且 PATH 里有 claude）`));
+    cp.on("error", (e) => finish(`无法启动 claude CLI：${e.message}（确认已 claude login，且 PATH 里有 claude）`));
     cp.on("close", (code) => {
       if (code !== 0 && !finalText) finalText = `claude-code 退出码 ${code}：${clip(stderr, 400)}`;
       // 若全程没流式出文本（如只有 result），把最终结果补发一次，保证 UI 有产出
-      if (!streamed && finalText) send({ type: "agent_delta", id: agent.id, text: finalText });
-      resolve(finalText);
+      if (!streamed && finalText && !settled) send({ type: "agent_delta", id: agent.id, text: finalText });
+      finish(finalText);
     });
     cp.stdin.write(userContent); cp.stdin.end();
   });
 }
 
-function runCodex(agent, userContent, send, ctx = {}, modelArg = "", options = {}) {
+async function runCodex(agent, userContent, send, ctx = {}, modelArg = "", options = {}) {
   const allowTools = options.forceTools || !!(agent.tools && agent.tools.length);
-  return codexExecOnce({
-    system: agent.system_prompt,
-    user: userContent,
-    modelArg,
-    cwd: ctx.baseDir,
-    sandbox: "danger-full-access",
-    allowTools,
-    secrets: ctx.secrets || {},
-    onThinking: (text) => send({ type: "agent_thinking", id: agent.id, text }),
-    onEvent: (event) => {
-      if (event.kind === "message" && event.text) {
-        if (looksLikeCodexProcessText(event.text)) send({ type: "agent_thinking", id: agent.id, text: event.text + "\n\n" });
-      } else if (event.kind === "tool_call") {
-        send({ type: "tool_call", id: agent.id, tool: event.tool, input: event.input });
-      } else if (event.kind === "tool_result") {
-        send({ type: "tool_result", id: agent.id, tool: event.tool, ok: event.ok, summary: clip(event.summary, 400) });
-      }
-    },
-  });
+  // 停战可中断：登记 aborter，停战时把 signal abort → codexExecOnce 杀子进程并 reject
+  const rec = ctx.runId ? runs.get(ctx.runId) : null;
+  const ac = new AbortController();
+  const aborterEntry = { ac, agentId: agent.id };
+  rec?.aborters?.add(aborterEntry);
+  try {
+    return await codexExecOnce({
+      system: agent.system_prompt,
+      user: userContent,
+      modelArg,
+      cwd: ctx.baseDir,
+      sandbox: "danger-full-access",
+      allowTools,
+      secrets: ctx.secrets || {},
+      signal: ac.signal,
+      onThinking: (text) => send({ type: "agent_thinking", id: agent.id, text }),
+      onEvent: (event) => {
+        if (event.kind === "message" && event.text) {
+          if (looksLikeCodexProcessText(event.text)) send({ type: "agent_thinking", id: agent.id, text: event.text + "\n\n" });
+        } else if (event.kind === "tool_call") {
+          send({ type: "tool_call", id: agent.id, tool: event.tool, input: event.input });
+        } else if (event.kind === "tool_result") {
+          send({ type: "tool_result", id: agent.id, tool: event.tool, ok: event.ok, summary: clip(event.summary, 400) });
+        }
+      },
+    });
+  } catch (e) {
+    if (ac.signal.aborted) return "[已停战] 已中断 codex 成员执行";
+    throw e;
+  } finally {
+    rec?.aborters?.delete(aborterEntry);
+  }
 }
 
 // 跑一个成员的核心循环：给定现成的 user 消息内容，处理 mock / ollama / CLI / anthropic(工具循环)。
@@ -1167,28 +1197,38 @@ ${JSON.stringify(tool.schema)}
 3. 只输出这个 JSON 对象本身，不要解释、不要 Markdown、不要代码围栏、不要任何普通文本。`;
   const onThinking = (text) => send && send({ type: "agent_thinking", id, text });
   const startedAt = Date.now();
+  // 停战可中断：将军走 CLI 时同样登记 aborter，停战 → abort signal → 杀子进程并 reject
+  const rec = ctx?.runId ? runs.get(ctx.runId) : null;
+  const ac = new AbortController();
+  const aborterEntry = { ac, agentId: id };
+  rec?.aborters?.add(aborterEntry);
   let raw;
-  if (eff === "codex-cli") {
-    raw = await codexExecOnce({
-      system,
-      user: `${input}\n\n${submitRule}`,
-      schema: tool.schema,
-      modelArg: codexModelArg(model),
-      onThinking,
-      onEvent: (event) => {
-        if (event?.kind === "message" && looksLikeCodexProcessText(event.text) && onThinking) {
-          onThinking(String(event.text).trim() + "\n\n");
-        }
-      },
-      cwd: ctx?.baseDir,
-      sandbox: "danger-full-access",
-      allowTools: false,
-      secrets: ctx?.secrets || {},
-    });
-  } else if (eff === "claude-code") {
-    raw = await claudeCodeOnce(system, `${input}\n\n${submitRule}`, ccModelArg(model), onThinking);
-  } else {
-    throw new Error(`runHarness 暂不支持 provider "${eff}" 的 CLI 终止工具模式。`);
+  try {
+    if (eff === "codex-cli") {
+      raw = await codexExecOnce({
+        system,
+        user: `${input}\n\n${submitRule}`,
+        schema: tool.schema,
+        modelArg: codexModelArg(model),
+        signal: ac.signal,
+        onThinking,
+        onEvent: (event) => {
+          if (event?.kind === "message" && looksLikeCodexProcessText(event.text) && onThinking) {
+            onThinking(String(event.text).trim() + "\n\n");
+          }
+        },
+        cwd: ctx?.baseDir,
+        sandbox: "danger-full-access",
+        allowTools: false,
+        secrets: ctx?.secrets || {},
+      });
+    } else if (eff === "claude-code") {
+      raw = await claudeCodeOnce(system, `${input}\n\n${submitRule}`, ccModelArg(model), onThinking, ac.signal);
+    } else {
+      throw new Error(`runHarness 暂不支持 provider "${eff}" 的 CLI 终止工具模式。`);
+    }
+  } finally {
+    rec?.aborters?.delete(aborterEntry);
   }
   const endedAt = Date.now();
   if (send) {
