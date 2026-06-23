@@ -14,6 +14,9 @@ const {
   harnessDecisionThinking,
   extractSkillModules,
   formatSkillModuleOutline,
+  computeSkillGlobalBase,
+  normalizeBaseConfig,
+  baseConfigEnv,
   detectConfirmationRequest,
   normalizeBlueprint,
   staffTeam,
@@ -482,6 +485,46 @@ test("战损报表聚合团队与成员 token 和作战时长", () => {
   assert.equal(member.duration_ms, 1500);
   assert.equal(member.usage.total_tokens, 50);
   assert.equal(member.steps[0].instruction, "准备");
+});
+
+test("团队共用 Skill：拆分时把不属于任何成员的全局部分逐字提取出来", () => {
+  const content = [
+    "# 总则", "整体风格：极简。Design Tokens 必须照搬：--bg:#000。",
+    "## Step 0：改写", "改写规则正文。",
+    "## Step 1：渲染", "渲染规则正文。",
+    "## 附录·共用注意事项", "全员都要注意的事。",
+  ].join("\n");
+  const sources = [{ name: "SKILL.md", content }];
+  const modules = extractSkillModules(sources);
+  // 假设只有 step-0 / step-1 被分给成员，其余（总则前导 + 附录）应进团队共用
+  const assigned = new Set(modules.filter((m) => /Step\s*0|Step\s*1/i.test(m.title)).map((m) => m.id));
+  const base = computeSkillGlobalBase(sources, modules, assigned);
+  assert.match(base, /整体风格：极简/);          // 前导全局规则进了共用
+  assert.match(base, /Design Tokens 必须照搬/);   // 关键全局约定没丢
+  assert.doesNotMatch(base, /改写规则正文/);       // 已分给成员的步骤不重复进共用
+
+  // normalizeSpec 要把 skill_global_base 原样保留
+  const spec = normalizeSpec({ ...branchSpec(), skill_global_base: base }, { preserveGraph: true });
+  assert.equal(spec.skill_global_base, base);
+});
+
+test("团队基础配置：归一 + 注入环境变量 + 写进全局 Skill", () => {
+  const raw = [
+    { key: "TARGET_RES", value: "1920x1080", desc: "分辨率" },
+    { key: "VOICE_ID", value: "", desc: "音色（待定）" },
+    { key: "TARGET_RES", value: "重复应被去重" },
+  ];
+  const norm = normalizeBaseConfig(raw);
+  assert.equal(norm.length, 2);                        // 去重
+  assert.equal(norm[0].value, "1920x1080");
+  const env = baseConfigEnv(norm);
+  assert.equal(env.TARGET_RES, "1920x1080");
+  assert.ok(!("VOICE_ID" in env));                     // 空值不注入环境变量
+
+  const spec = normalizeSpec({ ...branchSpec(), base_config: raw }, { preserveGraph: true });
+  assert.equal(spec.base_config.length, 2);
+  assert.match(spec.global_skill, /团队基础配置/);
+  assert.match(spec.global_skill, /TARGET_RES = 1920x1080/);
 });
 
 test("导入团队的全局 Skill 保留全部原始文件原文", () => {

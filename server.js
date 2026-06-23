@@ -11,7 +11,7 @@ const os = require("os");
 const { DESIGN_SYSTEM, TEAM_SCHEMA, PLATFORM_CATALOG, BLUEPRINT_SYSTEM, BLUEPRINT_SCHEMA, STAFF_SYSTEM, SKILL_DESIGN_SYSTEM, SKILL_TEAM_SCHEMA, EDIT_AGENT_SCHEMA, HARNESS_LANG_DIRECTIVE } = require("./lib/prompts");
 const { REAL_TOOL_NAMES, ORCH_ID, HARNESS_MAX_ROUNDS, HARNESS_MAX_MEMBER_CALLS, HARNESS_MAX_PARALLEL, HARNESS_DECISION_TOOL, HARNESS_UPDATE_TEAM_TOOL } = require("./lib/constants");
 const { clip, finiteTokenNumber, normalizeUsage, addUsageTotals } = require("./lib/util");
-const { extractJson, unwrapTeamSpec, splitLeadingEmoji, normalizeSkillSources, skillSourcesDigest, uniqueNonEmptyStrings, cleanOriginText, buildTeamOrigin, normalizeTeamOrigin, inferTeamOrigin, cleanModuleTitle, slugifyModuleId, isExplicitSkillModuleTitle, isSupplementalSkillModuleTitle, extractSkillModules, attachSkillModuleContent, formatSkillModuleOutline, buildTeamGlobalSkill, inferAgentRole, normalizeAgentRisk, normalizeSpec, toSecretsObject, normalizeBlueprint, mockBlueprint } = require("./lib/skills");
+const { extractJson, unwrapTeamSpec, splitLeadingEmoji, normalizeSkillSources, skillSourcesDigest, uniqueNonEmptyStrings, cleanOriginText, buildTeamOrigin, normalizeTeamOrigin, inferTeamOrigin, cleanModuleTitle, slugifyModuleId, isExplicitSkillModuleTitle, isSupplementalSkillModuleTitle, extractSkillModules, attachSkillModuleContent, formatSkillModuleOutline, buildTeamGlobalSkill, inferAgentRole, normalizeAgentRisk, normalizeSpec, toSecretsObject, normalizeBaseConfig, baseConfigEnv, computeSkillGlobalBase, normalizeBlueprint, mockBlueprint } = require("./lib/skills");
 const { topoWaves, hasHarnessOutput, harnessCandidates, missingHarnessMembers, harnessMemberRef, harnessMemberRefs, completedHarnessMembers, validateHarnessCall, normalizeDecisionAliases, validateHarnessDecision, harnessDecisionSchema, harnessDecisionTool, updateTeamTool, staleDownstreamMembers, extractArtifactPaths, nextMockHarnessDecision, sendHarnessThinking, harnessModelReasoning, harnessRoundThinking, harnessDecisionThinking } = require("./lib/planning");
 const { TEAMS_DIR, RUNS_DIR, MEMORIES_DIR, runs, safeMemoryId, teamMemoryPath, emptyTeamMemory, orchestratorUserInputsFromEvents, mergeConversations, readTeamMemory, writeTeamMemory, memberMemoryPath, emptyMemberMemory, readMemberMemory, writeMemberMemory, formatMemberMemoryForPrompt, runAgentOutputsFromEvents, runCompletedMemberIds, runCompletedMemberRefs, runMissingMembersFromEvents, updateTeamMemoryFromRunRecord, writeMemberMemoriesFromRunRecord, memorySnapshotForContinuation, buildContinuationTask, runRecordPath, persistRun, schedulePersistRun, persistRunNow, runBroadcast, runSummary, listRuns, getRunRecord, usageKnown, durationBetween, eventTime, buildBattleReport, battleReportSummary, teamPath, readTeamSpecById, createdAtFromTeamId, teamListFingerprint, teamDagForList, listTeams, saveTeam } = require("./lib/store");
 
@@ -1117,6 +1117,12 @@ async function designFromSkills(skills, description, designModel, send) {
       try {
         team.skill_sources = skillSources;
         attachSkillModuleContent(team, modules); // 把成员负责模块的原始 skill 原文逐字拼进其 system_prompt
+        // 拆分时确定"团队共用 Skill"：原文里没分给任何成员的全局部分（前导/风格/Design Tokens/目录约定等），
+        // 逐字保真，调度时随每个成员下发，避免全局规则只进将军、成员看不到 → 各自跑偏。
+        const assignedIds = new Set();
+        for (const a of team.agents || []) for (const r of (a.module_refs || [])) assignedIds.add(String(r));
+        const globalBase = computeSkillGlobalBase(skillSources, modules, assignedIds);
+        if (globalBase) team.skill_global_base = globalBase;
         return ensureMemberToolGrants(normalizeSpec(team, { preserveGraph: true }));
       } catch (e) {
         try { fs.writeFileSync(`/tmp/dianjiang-skill-invalid-${attempt}.json`, JSON.stringify({ error: e.message, raw }, null, 2)); } catch {}
@@ -2256,6 +2262,16 @@ function buildHarnessMemberInput(task, member, upstreamIds, outputs, instruction
     `# 将军本轮指令\n${instruction}\n\n` +
     `# 你的职责边界\n${member.role}\n`;
   if (reason) msg += `\n# 主控选择这条路线的原因\n${reason}\n`;
+  // 团队共用 Skill（拆分时确定的全局部分：整体目标/风格/Design Tokens/目录约定等）下发给每个成员，
+  // 让成员像 Claude Code 那样握有全局契约，而不是只看自己那一步 → 避免风格跑偏、跨成员不一致。
+  if (ctx.spec?.skill_global_base) {
+    msg += `\n# 团队共用 Skill（全员共用的全局规则/风格/约定，逐字遵守，与你下面的专属步骤同等优先）\n${ctx.spec.skill_global_base}\n`;
+  }
+  // 团队基础配置（2+ 成员共用变量）：全队统一取值，直接用，不要自造。
+  if (Array.isArray(ctx.spec?.base_config) && ctx.spec.base_config.length) {
+    msg += `\n# 团队基础配置（全队统一取值，请直接使用；运行时也以同名环境变量注入，shell 用 $KEY 取）\n` +
+      ctx.spec.base_config.map((c) => `- ${c.key} = ${c.value !== "" && c.value != null ? c.value : "（待填：按任务/上游确定并保持全队一致）"}${c.desc ? `（${c.desc}）` : ""}`).join("\n") + "\n";
+  }
   // 成员只带【它自己】的私有记忆（仿 Claude Code 子 agent 隔离），不灌整个团队记忆、不含别的成员、不含主控。
   // 只在续聊/再出征(ctx.teamMemory 存在=本次会读记忆)时带。
   if (ctx.teamMemory && ctx.spec) {
@@ -2473,7 +2489,8 @@ async function runTeam(spec, task, send, runId, opts = {}) {
     providerForModel(mainModel || systemDefaultModel()) === "codex-cli";
   const needDir = provider !== "mock" && (willUseTools || usesClaudeCode || usesCodexCli || harnessIsClaudeCode || harnessIsCodexCli);
   if (needDir) fs.mkdirSync(baseDir, { recursive: true });
-  const ctx = { baseDir, mainModel, secrets: spec.secrets || {}, send, runId, spec, teamMemory: opts.memorySnapshot || null, skillSources: normalizeSkillSources(spec.skill_sources) };
+  // 注入 shell 环境的变量 = 团队基础配置(非密钥共用变量) + secrets(密钥，同名时覆盖基础配置)
+  const ctx = { baseDir, mainModel, secrets: { ...baseConfigEnv(spec.base_config), ...(spec.secrets || {}) }, send, runId, spec, teamMemory: opts.memorySnapshot || null, skillSources: normalizeSkillSources(spec.skill_sources) };
 
   send({
     type: "run_start",
@@ -3291,7 +3308,8 @@ if (require.main === module) {
 
 module.exports = {
   TOOL_REGISTRY, normalizeSpec, topoWaves, buildAgentInput,
-  normalizeSkillSources, skillSourcesDigest, extractSkillModules, formatSkillModuleOutline,
+  normalizeSkillSources, skillSourcesDigest, extractSkillModules, formatSkillModuleOutline, computeSkillGlobalBase,
+  normalizeBaseConfig, baseConfigEnv,
   harnessCandidates, validateHarnessDecision, normalizeDecisionAliases, nextMockHarnessDecision,
   buildHarnessMemberInput, harnessDecisionSchema, harnessDecisionTool, HARNESS_DECISION_TOOL, buildTeamGlobalSkill,
   harnessRoundThinking, harnessDecisionThinking,
